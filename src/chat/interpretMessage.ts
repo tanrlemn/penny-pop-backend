@@ -10,6 +10,40 @@ function normalizeName(s: string): string {
     .replace(/\s+/g, ' ');
 }
 
+type TransferIntent = 'observed_transfer' | 'request_transfer' | 'unknown';
+
+interface ObservedTransferEventDraft {
+  amount_in_cents: number;
+  from_pod_id: Uuid;
+  from_pod_name: string;
+  to_pod_id: Uuid;
+  to_pod_name: string;
+  raw_message_text: string;
+}
+
+function stripOuterQuotes(s: string): string {
+  const trimmed = s.trim();
+  return trimmed.replace(/^[“"']+/, '').replace(/[”"']+$/, '').trim();
+}
+
+function detectTransferIntent(messageText: string): TransferIntent {
+  const text = stripOuterQuotes(messageText).toLowerCase();
+
+  const observed =
+    /\bi\s+(?:already\s+)?moved\b/.test(text) ||
+    /\bi\s+transferred\b/.test(text) ||
+    /\bi\s+had\s+to\s+move\b/.test(text) ||
+    /\bi\s+had\s+to\s+transfer\b/.test(text) ||
+    /^\s*(?:moved|transferred)\b/.test(text);
+
+  if (observed) return 'observed_transfer';
+
+  const requested = /\b(move|transfer)\b/.test(text);
+  if (requested) return 'request_transfer';
+
+  return 'unknown';
+}
+
 function parseUsdToCents(raw: string): number | null {
   const cleaned = raw.replace(/,/g, '').trim();
   if (!cleaned) return null;
@@ -74,15 +108,18 @@ export function interpretMessage(opts: {
   assistantText: string;
   proposedActionDrafts: ProposedActionDraft[];
   entities: ParsedEntitiesHints;
+  observedTransferEvent?: ObservedTransferEventDraft;
 } {
   const messageText = (opts.messageText ?? '').trim();
+  const strippedMessageText = stripOuterQuotes(messageText);
   const pods = opts.pods;
   const podNames = pods.map((p) => p.name);
+  const transferIntent = detectTransferIntent(strippedMessageText);
 
   // 1) moved $X from A to B
   {
-    const m = messageText.match(
-      /^\s*moved\s+\$?\s*([\d,]+(?:\.\d{1,2})?)\s+from\s+(.+?)\s+to\s+(.+?)\s*$/i,
+    const m = strippedMessageText.match(
+      /^\s*(?:i\s+(?:already\s+)?(?:moved|transferred)|i\s+had\s+to\s+(?:move|transfer)|i\s+need\s+to\s+(?:move|transfer)|can\s+you\s+(?:move|transfer)|(?:move|transfer|moved|transferred))\s+\$?\s*([\d,]+(?:\.\d{1,2})?)\s+from\s+(.+?)\s+to\s+(.+?)\s*$/i,
     );
     if (m) {
       const amountRaw = m[1] ?? '';
@@ -129,6 +166,84 @@ export function interpretMessage(opts: {
           assistantText: `Those look like the same pod (“${from.name}”). Which pod should receive the money?`,
           proposedActionDrafts: [],
           entities,
+        };
+      }
+
+      const observedTransferEvent: ObservedTransferEventDraft = {
+        amount_in_cents: amountInCents,
+        from_pod_id: from.id,
+        from_pod_name: from.name,
+        to_pod_id: to.id,
+        to_pod_name: to.name,
+        raw_message_text: messageText,
+      };
+
+      if (transferIntent === 'observed_transfer') {
+        const fundingPrimary = 'Move to ___';
+        const fundingFallback = 'Safety Net';
+
+        const fundingPrimaryCandidates = rankCandidates(fundingPrimary, podNames, 1);
+        const fundingPrimaryName =
+          resolveUniquePodIdByName({ raw: fundingPrimary, pods })?.name ??
+          fundingPrimaryCandidates[0];
+        const fundingPrimaryPod =
+          (fundingPrimaryName && pods.find((p) => p.name === fundingPrimaryName)) ?? null;
+
+        let fundingPod = fundingPrimaryPod;
+        let fundingCandidate = fundingPrimaryName ?? fundingPrimary;
+
+        if (!fundingPod) {
+          const fundingFallbackCandidates = rankCandidates(fundingFallback, podNames, 1);
+          const fundingFallbackName =
+            resolveUniquePodIdByName({ raw: fundingFallback, pods })?.name ??
+            fundingFallbackCandidates[0];
+          fundingPod =
+            (fundingFallbackName && pods.find((p) => p.name === fundingFallbackName)) ?? null;
+          fundingCandidate = fundingFallbackName ?? fundingFallback;
+        }
+
+        const repairCandidates = Array.from(
+          new Set([
+            ...candidates,
+            ...rankCandidates(fundingCandidate ?? '', podNames),
+          ]),
+        );
+
+        const repairEntities: ParsedEntitiesHints = {
+          fromCandidate: fromRaw,
+          toCandidate: toRaw,
+          fundingCandidate,
+          candidates: repairCandidates,
+        };
+
+        if (!fundingPod) {
+          return {
+            assistantText:
+              `Got it — logged that transfer. Which pod should I pull from to repair the budget plan?`,
+            proposedActionDrafts: [],
+            entities: repairEntities,
+            observedTransferEvent,
+          };
+        }
+
+        return {
+          assistantText:
+            `Got it — logged that transfer. Here’s the cleanest way to repair your budget plan.`,
+          proposedActionDrafts: [
+            {
+              type: 'budget_repair_restore_donor',
+              payload: {
+                kind: 'budget_repair_restore_donor',
+                amount_in_cents: amountInCents,
+                donor_pod_id: from.id,
+                donor_pod_name: from.name,
+                funding_pod_id: fundingPod.id,
+                funding_pod_name: fundingPod.name,
+              },
+            },
+          ],
+          entities: repairEntities,
+          observedTransferEvent,
         };
       }
 

@@ -26,6 +26,48 @@ function assertNonNegativeBudget(next: number, podName: string) {
   }
 }
 
+export function applyPayloadsToBudgetMap(
+  payloads: ProposedActionPayload[],
+  budgetByPodId: Map<Uuid, number>,
+): void {
+  for (const payload of payloads) {
+    if (payload.kind === 'budget_transfer') {
+      const amt = payload.amount_in_cents;
+      const fromCur = budgetByPodId.get(payload.from_pod_id) ?? 0;
+      const toCur = budgetByPodId.get(payload.to_pod_id) ?? 0;
+      const fromNext = fromCur - amt;
+      const toNext = toCur + amt;
+      assertNonNegativeBudget(fromNext, payload.from_pod_name);
+      budgetByPodId.set(payload.from_pod_id, fromNext);
+      budgetByPodId.set(payload.to_pod_id, toNext);
+      continue;
+    }
+
+    if (payload.kind === 'budget_adjust') {
+      const cur = budgetByPodId.get(payload.pod_id) ?? 0;
+      const next = cur + payload.delta_in_cents;
+      assertNonNegativeBudget(next, payload.pod_name);
+      budgetByPodId.set(payload.pod_id, next);
+      continue;
+    }
+
+    if (payload.kind === 'budget_repair_restore_donor') {
+      const amt = payload.amount_in_cents;
+      const donorCur = budgetByPodId.get(payload.donor_pod_id) ?? 0;
+      const fundingCur = budgetByPodId.get(payload.funding_pod_id) ?? 0;
+      const donorNext = donorCur + amt;
+      const fundingNext = fundingCur - amt;
+      assertNonNegativeBudget(fundingNext, payload.funding_pod_name);
+      budgetByPodId.set(payload.donor_pod_id, donorNext);
+      budgetByPodId.set(payload.funding_pod_id, fundingNext);
+      continue;
+    }
+
+    // Unknown payload kinds should not happen in Phase 1.
+    throw new Error(`Unsupported action payload kind: ${(payload as any)?.kind}`);
+  }
+}
+
 export async function handleApplyActions(opts: {
   method: string;
   headers: Record<string, any>;
@@ -100,6 +142,9 @@ export async function handleApplyActions(opts: {
           if (p.payload?.kind === 'budget_adjust') {
             return [p.payload.pod_id];
           }
+          if (p.payload?.kind === 'budget_repair_restore_donor') {
+            return [p.payload.donor_pod_id, p.payload.funding_pod_id];
+          }
           return [];
         }),
       ),
@@ -126,31 +171,14 @@ export async function handleApplyActions(opts: {
     }
 
     // Compute final budgets deterministically.
-    for (const a of payloads) {
-      const payload = a.payload;
-
-      if (payload.kind === 'budget_transfer') {
-        const amt = payload.amount_in_cents;
-        const fromCur = budgetByPodId.get(payload.from_pod_id) ?? 0;
-        const toCur = budgetByPodId.get(payload.to_pod_id) ?? 0;
-        const fromNext = fromCur - amt;
-        const toNext = toCur + amt;
-        assertNonNegativeBudget(fromNext, payload.from_pod_name);
-        budgetByPodId.set(payload.from_pod_id, fromNext);
-        budgetByPodId.set(payload.to_pod_id, toNext);
-        continue;
-      }
-
-      if (payload.kind === 'budget_adjust') {
-        const cur = budgetByPodId.get(payload.pod_id) ?? 0;
-        const next = cur + payload.delta_in_cents;
-        assertNonNegativeBudget(next, payload.pod_name);
-        budgetByPodId.set(payload.pod_id, next);
-        continue;
-      }
-
-      // Unknown payload kinds should not happen in Phase 1.
-      return { status: 400, json: { error: `Unsupported action payload kind: ${(payload as any)?.kind}` } };
+    try {
+      applyPayloadsToBudgetMap(
+        payloads.map((p) => p.payload),
+        budgetByPodId,
+      );
+    } catch (err) {
+      const msg = asErrorMessage(err);
+      return { status: 400, json: { error: msg } };
     }
 
     const updates = Array.from(budgetByPodId.entries()).map(([podId, cents]) => ({

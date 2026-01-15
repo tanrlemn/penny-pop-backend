@@ -1,5 +1,6 @@
 import { verifyUser } from '../auth/verifyUser';
 import { interpretMessage } from '../chat/interpretMessage';
+import { insertBudgetEvents } from '../repos/budgetEventsRepo';
 import { assertUserInHousehold } from '../repos/householdsRepo';
 import { insertChatMessage } from '../repos/chatMessagesRepo';
 import { getOrCreateChatThreadForHousehold } from '../repos/chatThreadsRepo';
@@ -39,7 +40,7 @@ export async function handleChatMessage(opts: {
     });
     const pods = podsWithSettings.map((p) => ({ id: p.pod.id, name: p.pod.name }));
 
-    const { assistantText, proposedActionDrafts, entities } = interpretMessage({
+    const { assistantText, proposedActionDrafts, entities, observedTransferEvent } = interpretMessage({
       messageText,
       pods,
     });
@@ -58,6 +59,17 @@ export async function handleChatMessage(opts: {
       senderUserId: null,
       text: assistantText,
     });
+
+    if (observedTransferEvent) {
+      await insertBudgetEvents([
+        {
+          household_id: householdId,
+          actor_user_id: userId as Uuid,
+          type: 'observed_transfer',
+          payload: observedTransferEvent,
+        },
+      ]);
+    }
 
     const actionRows = await insertProposedActions({
       householdId,

@@ -98,6 +98,44 @@ Response body:
 }
 ```
 
+Transfer intent rules:
+
+- **Observed transfers** (already happened): “I moved…”, “I transferred…”, “I had to move…”.
+  - Logs a `budget_events` entry with type `observed_transfer`.
+  - Proposes a repair action (`budget_repair_restore_donor`) to restore the donor budget.
+  - Uses `Move to ___` as the default funding pod (fallback: `Safety Net`).
+- **Requested transfers** (future/imperative): “Move…”, “I need to move…”, “Can you move…”.
+  - Proposes a `budget_transfer` action (no observed event).
+
+Observed transfer response example:
+
+```json
+{
+  "assistantText": "Got it — logged that transfer. Here’s the cleanest way to repair your budget plan.",
+  "proposedActions": [
+    {
+      "id": "<uuid>",
+      "type": "budget_repair_restore_donor",
+      "payload": {
+        "kind": "budget_repair_restore_donor",
+        "amount_in_cents": 8000,
+        "donor_pod_id": "<uuid>",
+        "donor_pod_name": "Groceries",
+        "funding_pod_id": "<uuid>",
+        "funding_pod_name": "Move to ___"
+      },
+      "status": "proposed"
+    }
+  ],
+  "entities": {
+    "fromCandidate": "Groceries",
+    "toCandidate": "Education",
+    "fundingCandidate": "Move to ___",
+    "candidates": ["Groceries", "Education", "Move to ___"]
+  }
+}
+```
+
 ### `POST /api/actions/apply`
 
 Request body:
@@ -183,7 +221,8 @@ npm run fixit:dev
 This is intended to run on an always-on worker (e.g. a small DigitalOcean droplet). The weekly savings sentinel can continue to run via GitHub Actions.
 
 ### Manual checklist
-- Transfer request: “I moved $80 from Groceries to Education” → ROUTING donor uses `Move to ___`, not a protected envelope (e.g. Car Payment).
+- Observed transfer: “I moved $80 from Groceries to Education” → log observed event + propose repair from `Move to ___`.
+- Transfer request: “Move $80 from Groceries to Education” → propose `budget_transfer`.
 
 ## Sequence Remote API (deposit routing)
 

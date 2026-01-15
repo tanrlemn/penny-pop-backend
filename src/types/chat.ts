@@ -4,7 +4,10 @@ export type ChatSenderRole = 'user' | 'assistant';
 
 export type ProposedActionStatus = 'proposed' | 'applied' | 'ignored' | 'failed';
 
-export type ProposedActionType = 'budget_transfer' | 'budget_adjust';
+export type ProposedActionType =
+  | 'budget_transfer'
+  | 'budget_adjust'
+  | 'budget_repair_restore_donor';
 
 export type ProposedActionPayload =
   | {
@@ -20,6 +23,14 @@ export type ProposedActionPayload =
       delta_in_cents: number;
       pod_id: Uuid;
       pod_name: string;
+    }
+  | {
+      kind: 'budget_repair_restore_donor';
+      amount_in_cents: number;
+      donor_pod_id: Uuid;
+      donor_pod_name: string;
+      funding_pod_id: Uuid;
+      funding_pod_name: string;
     };
 
 export interface ProposedAction {
@@ -37,6 +48,7 @@ export interface ProposedActionDraft {
 export interface ParsedEntitiesHints {
   fromCandidate?: string | null;
   toCandidate?: string | null;
+  fundingCandidate?: string | null;
   candidates: string[];
 }
 
