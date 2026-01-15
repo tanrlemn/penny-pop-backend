@@ -12,7 +12,8 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.90.1"
+    "@supabase/supabase-js": "^2.90.1",
+    "@vercel/node": "^5.5.22"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
