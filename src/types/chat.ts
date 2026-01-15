@@ -70,6 +70,14 @@ export interface ApplyActionsRequestBody {
 }
 
 export interface ApplyActionsResponseBody {
+  appliedActionIds: Uuid[];
+  changes: Array<{
+    pod_id: Uuid;
+    pod_name: string;
+    delta_in_cents: number;
+    before_in_cents: number;
+    after_in_cents: number;
+  }>;
   pods: Array<{
     id: Uuid;
     name: string;

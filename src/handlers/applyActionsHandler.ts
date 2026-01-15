@@ -8,8 +8,14 @@ import type { ApplyActionsResponseBody, ProposedActionPayload } from '../types/c
 import type { PodWithSettings, Uuid } from '../types/supabase';
 import { asErrorMessage, getHeader, type HandlerResult } from './http';
 
-function toSnapshot(pods: PodWithSettings[]): ApplyActionsResponseBody {
+function toSnapshot(
+  pods: PodWithSettings[],
+  appliedActionIds: Uuid[],
+  changes: ApplyActionsResponseBody['changes'],
+): ApplyActionsResponseBody {
   return {
+    appliedActionIds,
+    changes,
     pods: pods.map((p) => ({
       id: p.pod.id,
       name: p.pod.name,
@@ -18,6 +24,31 @@ function toSnapshot(pods: PodWithSettings[]): ApplyActionsResponseBody {
       category: p.settings?.category ?? null,
     })),
   };
+}
+
+function toChanges(
+  podIds: Uuid[],
+  podsById: Map<Uuid, { id: Uuid; name: string }>,
+  beforeBudgetByPodId: Map<Uuid, number>,
+  afterBudgetByPodId: Map<Uuid, number>,
+): ApplyActionsResponseBody['changes'] {
+  const changes: ApplyActionsResponseBody['changes'] = [];
+  for (const podId of podIds) {
+    const before = beforeBudgetByPodId.get(podId) ?? 0;
+    const after = afterBudgetByPodId.get(podId) ?? 0;
+    const delta = after - before;
+    if (delta === 0) continue;
+    const pod = podsById.get(podId);
+    if (!pod) continue;
+    changes.push({
+      pod_id: podId,
+      pod_name: pod.name,
+      delta_in_cents: delta,
+      before_in_cents: before,
+      after_in_cents: after,
+    });
+  }
+  return changes;
 }
 
 function assertNonNegativeBudget(next: number, podName: string) {
@@ -113,7 +144,7 @@ export async function handleApplyActions(opts: {
         const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
           activeOnly: true,
         });
-        return { status: 200, json: toSnapshot(podsWithSettings) };
+        return { status: 200, json: toSnapshot(podsWithSettings, actionIds, []) };
       }
 
       const firstNonProposed = actions.find((a) => a.status !== 'proposed');
@@ -169,6 +200,7 @@ export async function handleApplyActions(opts: {
     for (const s of settings) {
       budgetByPodId.set(s.pod_id, s.budgeted_amount_in_cents ?? 0);
     }
+    const beforeBudgetByPodId = new Map(budgetByPodId);
 
     // Compute final budgets deterministically.
     try {
@@ -181,6 +213,7 @@ export async function handleApplyActions(opts: {
       return { status: 400, json: { error: msg } };
     }
 
+    const changes = toChanges(podIds, podsById, beforeBudgetByPodId, budgetByPodId);
     const updates = Array.from(budgetByPodId.entries()).map(([podId, cents]) => ({
       podId,
       budgetedAmountInCents: cents,
@@ -211,7 +244,7 @@ export async function handleApplyActions(opts: {
     const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
       activeOnly: true,
     });
-    return { status: 200, json: toSnapshot(podsWithSettings) };
+    return { status: 200, json: toSnapshot(podsWithSettings, actionIds, changes) };
   } catch (err) {
     const msg = asErrorMessage(err);
 
