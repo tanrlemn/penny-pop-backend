@@ -50,3 +50,43 @@ export interface PodWithSettings {
   settings: PodSettingsRow | null;
 }
 
+export interface ChatThreadRow {
+  id: Uuid;
+  household_id: Uuid;
+  created_at: string; // timestamptz
+}
+
+export type ChatMessageSenderRole = 'user' | 'assistant';
+
+export interface ChatMessageRow {
+  id: Uuid;
+  thread_id: Uuid;
+  sender_role: ChatMessageSenderRole;
+  sender_user_id: Uuid | null;
+  text: string;
+  created_at: string; // timestamptz
+}
+
+export type ProposedActionRowStatus = 'proposed' | 'applied' | 'ignored' | 'failed';
+
+export interface ProposedActionRow {
+  id: Uuid;
+  household_id: Uuid;
+  message_id: Uuid;
+  type: string;
+  payload_json: unknown;
+  status: ProposedActionRowStatus;
+  applied_at: string | null; // timestamptz
+  applied_by: Uuid | null;
+  created_at: string; // timestamptz
+}
+
+export interface BudgetEventRow {
+  id: Uuid;
+  household_id: Uuid;
+  actor_user_id: Uuid | null;
+  type: string;
+  payload: unknown;
+  created_at: string; // timestamptz
+}
+

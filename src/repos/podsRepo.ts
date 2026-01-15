@@ -22,6 +22,19 @@ export async function listPodsForHousehold(
   return (data as PodRow[]) ?? [];
 }
 
+export async function listPodsByIds(podIds: Uuid[]): Promise<PodRow[]> {
+  if (podIds.length === 0) return [];
+  const supabase = getSupabaseServerClient();
+
+  const { data, error } = await supabase.from('pods').select('*').in('id', podIds);
+
+  if (error) {
+    throw new Error(`pods lookup by ids failed: ${error.message}`);
+  }
+
+  return (data as PodRow[]) ?? [];
+}
+
 export async function listPodsWithSettingsForHousehold(
   householdId: Uuid,
   opts?: { activeOnly?: boolean },

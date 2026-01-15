@@ -48,7 +48,7 @@ Required keys:
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
 - `EMAIL_FROM`, `EMAIL_TO`
 
-Supabase (server-side API layer, coming next):
+Supabase (server-side API layer):
 - `SUPABASE_URL`
 - `SUPABASE_SECRET_KEY` (server-only; never expose to clients)
 
@@ -57,6 +57,69 @@ Quick sanity script (pods for a user across their household(s)):
 ```bash
 npm run build
 USER_ID="<uuid>" SUPABASE_URL="<url>" SUPABASE_SECRET_KEY="<secret_key>" node dist/scripts/testSupabasePods.js
+```
+
+## App-first Chat API (Phase 1)
+
+This repo includes two minimal, app-first endpoints (no AI) implemented as Vercel-style functions:
+
+- `POST /api/chat/message` (`api/chat/message.ts`)
+- `POST /api/actions/apply` (`api/actions/apply.ts`)
+
+Both endpoints require:
+
+- Header: `Authorization: Bearer <Supabase JWT>`
+- The authenticated user must be a member of the provided `householdId`.
+
+### Database migrations
+
+Apply the SQL migration in `supabase/migrations/20260115000000_chat_budget_events.sql` (via Supabase SQL editor or your migration tooling). It creates:
+
+- `chat_threads` (one per household; `household_id` is unique)
+- `chat_messages` (user/assistant messages per thread)
+- `proposed_actions` (stored proposals linked to the assistant message; includes applied metadata)
+- `budget_events` (append-only history for applied actions)
+
+### `POST /api/chat/message`
+
+Request body:
+
+```json
+{ "householdId": "<uuid>", "messageText": "moved $80 from Groceries to Education" }
+```
+
+Response body:
+
+```json
+{
+  "assistantText": "…",
+  "proposedActions": [{ "id": "<uuid>", "type": "budget_transfer", "payload": { "kind": "budget_transfer", "...": "..." }, "status": "proposed" }],
+  "entities": { "fromCandidate": "…", "toCandidate": "…", "candidates": ["…"] }
+}
+```
+
+### `POST /api/actions/apply`
+
+Request body:
+
+```json
+{ "householdId": "<uuid>", "actionIds": ["<uuid>", "<uuid>"] }
+```
+
+Response body (UI snapshot):
+
+```json
+{
+  "pods": [
+    {
+      "id": "<uuid>",
+      "name": "Groceries",
+      "balance_amount_in_cents": 12345,
+      "budgeted_amount_in_cents": 20000,
+      "category": "Necessities"
+    }
+  ]
+}
 ```
 
 ## GitHub Actions deployment
