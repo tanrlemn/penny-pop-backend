@@ -1,6 +1,6 @@
 import { verifyUser } from '../auth/verifyUser';
 import { interpretMessage } from '../chat/interpretMessage';
-import { insertBudgetEvents } from '../repos/budgetEventsRepo';
+import { hasRecentObservedTransfer, insertBudgetEvents } from '../repos/budgetEventsRepo';
 import { assertUserInHousehold } from '../repos/householdsRepo';
 import { insertChatMessage } from '../repos/chatMessagesRepo';
 import { getOrCreateChatThreadForHousehold } from '../repos/chatThreadsRepo';
@@ -66,14 +66,39 @@ export async function handleChatMessage(opts: {
     });
 
     if (observedTransferEvent) {
-      await insertBudgetEvents([
-        {
-          household_id: householdId,
-          actor_user_id: userId as Uuid,
-          type: 'observed_transfer',
-          payload: observedTransferEvent,
-        },
-      ]);
+      const amountInCents = observedTransferEvent.amount_in_cents;
+      const fromPodId = observedTransferEvent.from_pod_id;
+      const toPodId = observedTransferEvent.to_pod_id;
+      const hasRecent = await hasRecentObservedTransfer({
+        householdId,
+        fromPodId,
+        toPodId,
+        amountInCents,
+      });
+
+      if (hasRecent) {
+        console.log('observed_transfer dedup hit: skipping insert', {
+          householdId,
+          fromPodId,
+          toPodId,
+          amountInCents,
+        });
+      } else {
+        await insertBudgetEvents([
+          {
+            household_id: householdId,
+            actor_user_id: userId as Uuid,
+            type: 'observed_transfer',
+            payload: observedTransferEvent,
+          },
+        ]);
+        console.log('observed_transfer inserted', {
+          householdId,
+          fromPodId,
+          toPodId,
+          amountInCents,
+        });
+      }
     }
 
     const actionRows = await insertProposedActions({

@@ -8,6 +8,33 @@ export interface BudgetEventInsert {
   payload: unknown;
 }
 
+export async function hasRecentObservedTransfer(opts: {
+  householdId: Uuid;
+  fromPodId: Uuid;
+  toPodId: Uuid;
+  amountInCents: number;
+}): Promise<boolean> {
+  const supabase = getSupabaseServerClient();
+  const sinceIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from('budget_events')
+    .select('id')
+    .eq('household_id', opts.householdId)
+    .eq('type', 'observed_transfer')
+    .eq('payload->>from_pod_id', opts.fromPodId)
+    .eq('payload->>to_pod_id', opts.toPodId)
+    .eq('payload->>amount_in_cents', String(opts.amountInCents))
+    .gte('created_at', sinceIso)
+    .limit(1);
+
+  if (error) {
+    throw new Error(`budget_events observed_transfer dedup query failed: ${error.message}`);
+  }
+
+  return (data?.length ?? 0) > 0;
+}
+
 export async function insertBudgetEvents(
   events: BudgetEventInsert[],
 ): Promise<BudgetEventRow[]> {
