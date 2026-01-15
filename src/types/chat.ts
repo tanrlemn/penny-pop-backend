@@ -31,6 +31,7 @@ export type ProposedActionPayload =
       donor_pod_name: string;
       funding_pod_id: Uuid;
       funding_pod_name: string;
+      option_label?: string;
     };
 
 export interface ProposedAction {

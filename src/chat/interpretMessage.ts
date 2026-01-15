@@ -1,4 +1,4 @@
-import type { Uuid } from '../types/supabase';
+import type { PodSettingsCategory, Uuid } from '../types/supabase';
 import type { ParsedEntitiesHints, ProposedActionDraft } from '../types/chat';
 
 function normalizeName(s: string): string {
@@ -9,6 +9,13 @@ function normalizeName(s: string): string {
     .trim()
     .replace(/\s+/g, ' ');
 }
+
+type PodSnapshot = {
+  id: Uuid;
+  name: string;
+  budgeted_amount_in_cents?: number | null;
+  category?: PodSettingsCategory | null;
+};
 
 type TransferIntent = 'observed_transfer' | 'request_transfer' | 'unknown';
 
@@ -24,6 +31,128 @@ interface ObservedTransferEventDraft {
 function stripOuterQuotes(s: string): string {
   const trimmed = s.trim();
   return trimmed.replace(/^[“"']+/, '').replace(/[”"']+$/, '').trim();
+}
+
+const MOVE_TO_POD_NAME = 'Move to ___';
+const PROTECTED_POD_NAMES = new Set(
+  [
+    'Rent',
+    'Utilities',
+    'AES Electric',
+    'Citizens Gas Water',
+    'Phones',
+    'Wifi',
+    'Sequence Billing',
+  ].map(normalizeName),
+);
+
+function getAvailableToReduce(pod: PodSnapshot): number {
+  return Math.max(0, pod.budgeted_amount_in_cents ?? 0);
+}
+
+function isProtectedPodName(name: string): boolean {
+  return PROTECTED_POD_NAMES.has(normalizeName(name));
+}
+
+function categoryRank(category: PodSettingsCategory | null | undefined, isDonor: boolean): number {
+  if (category === 'Savings' && isDonor) return 5;
+  if (category === 'Savings') return 1;
+  if (category === 'Discretionary') return 2;
+  if (category === 'Pressing') return 3;
+  if (category === 'Necessities') return 4;
+  return 5;
+}
+
+function sortFundingCandidates(
+  candidates: Array<{
+    pod: PodSnapshot;
+    available: number;
+    isProtected: boolean;
+    isMoveTo: boolean;
+    isDonor: boolean;
+  }>,
+): Array<{
+  pod: PodSnapshot;
+  available: number;
+  isProtected: boolean;
+  isMoveTo: boolean;
+  isDonor: boolean;
+}> {
+  return [...candidates].sort((a, b) => {
+    if (a.isMoveTo !== b.isMoveTo) return a.isMoveTo ? -1 : 1;
+    const aRank = categoryRank(a.pod.category ?? null, a.isDonor);
+    const bRank = categoryRank(b.pod.category ?? null, b.isDonor);
+    if (aRank !== bRank) return aRank - bRank;
+    if (a.isDonor !== b.isDonor) return a.isDonor ? 1 : -1;
+    return a.pod.name.localeCompare(b.pod.name);
+  });
+}
+
+function selectFundingOptions(opts: {
+  pods: PodSnapshot[];
+  donorPodId: Uuid;
+  amountInCents: number;
+  maxOptions?: number;
+}): {
+  singleOptions: PodSnapshot[];
+  splitOptions: Array<{
+    a: PodSnapshot;
+    b: PodSnapshot;
+    aAmount: number;
+    bAmount: number;
+  }>;
+} {
+  const maxOptions = opts.maxOptions ?? 3;
+  const baseCandidates = opts.pods.map((pod) => ({
+    pod,
+    available: getAvailableToReduce(pod),
+    isProtected: isProtectedPodName(pod.name),
+    isMoveTo: pod.name === MOVE_TO_POD_NAME,
+    isDonor: pod.id === opts.donorPodId,
+  }));
+
+  const fullCoverage = baseCandidates.filter((c) => c.available >= opts.amountInCents);
+  const fullCoverageNonProtected = fullCoverage.filter((c) => !c.isProtected);
+  const fullPool = fullCoverageNonProtected.length > 0 ? fullCoverageNonProtected : fullCoverage;
+  const rankedSingles = sortFundingCandidates(fullPool).slice(0, maxOptions);
+
+  if (rankedSingles.length > 0) {
+    return { singleOptions: rankedSingles.map((c) => c.pod), splitOptions: [] };
+  }
+
+  const splitCandidates = baseCandidates.filter((c) => c.available > 0);
+  const splitNonProtected = splitCandidates.filter((c) => !c.isProtected);
+  const splitPool =
+    splitNonProtected.length >= 2 ? splitNonProtected : splitCandidates;
+  const rankedSplit = sortFundingCandidates(splitPool);
+  const splitOptions: Array<{
+    a: PodSnapshot;
+    b: PodSnapshot;
+    aAmount: number;
+    bAmount: number;
+  }> = [];
+
+  for (let i = 0; i < rankedSplit.length; i += 1) {
+    for (let j = i + 1; j < rankedSplit.length; j += 1) {
+      const a = rankedSplit[i];
+      const b = rankedSplit[j];
+      const aAmount = Math.min(a.available, opts.amountInCents);
+      const remaining = opts.amountInCents - aAmount;
+      if (remaining <= 0) continue;
+      if (remaining <= b.available) {
+        splitOptions.push({
+          a: a.pod,
+          b: b.pod,
+          aAmount,
+          bAmount: remaining,
+        });
+      }
+      if (splitOptions.length >= maxOptions) break;
+    }
+    if (splitOptions.length >= maxOptions) break;
+  }
+
+  return { singleOptions: [], splitOptions };
 }
 
 function detectTransferIntent(messageText: string): TransferIntent {
@@ -103,7 +232,7 @@ function resolveUniquePodIdByName(opts: {
 
 export function interpretMessage(opts: {
   messageText: string;
-  pods: Array<{ id: Uuid; name: string }>;
+  pods: PodSnapshot[];
 }): {
   assistantText: string;
   proposedActionDrafts: ProposedActionDraft[];
@@ -179,44 +308,29 @@ export function interpretMessage(opts: {
       };
 
       if (transferIntent === 'observed_transfer') {
-        const fundingPrimary = 'Move to ___';
-        const fundingFallback = 'Safety Net';
-
-        const fundingPrimaryCandidates = rankCandidates(fundingPrimary, podNames, 1);
-        const fundingPrimaryName =
-          resolveUniquePodIdByName({ raw: fundingPrimary, pods })?.name ??
-          fundingPrimaryCandidates[0];
-        const fundingPrimaryPod =
-          (fundingPrimaryName && pods.find((p) => p.name === fundingPrimaryName)) ?? null;
-
-        let fundingPod = fundingPrimaryPod;
-        let fundingCandidate = fundingPrimaryName ?? fundingPrimary;
-
-        if (!fundingPod) {
-          const fundingFallbackCandidates = rankCandidates(fundingFallback, podNames, 1);
-          const fundingFallbackName =
-            resolveUniquePodIdByName({ raw: fundingFallback, pods })?.name ??
-            fundingFallbackCandidates[0];
-          fundingPod =
-            (fundingFallbackName && pods.find((p) => p.name === fundingFallbackName)) ?? null;
-          fundingCandidate = fundingFallbackName ?? fundingFallback;
-        }
-
+        const { singleOptions, splitOptions } = selectFundingOptions({
+          pods,
+          donorPodId: from.id,
+          amountInCents,
+        });
+        const optionLabels = ['A', 'B', 'C'];
+        const primaryFundingCandidate =
+          singleOptions[0]?.name ??
+          splitOptions[0]?.a.name ??
+          splitOptions[0]?.b.name ??
+          MOVE_TO_POD_NAME;
         const repairCandidates = Array.from(
-          new Set([
-            ...candidates,
-            ...rankCandidates(fundingCandidate ?? '', podNames),
-          ]),
+          new Set([...candidates, ...rankCandidates(primaryFundingCandidate ?? '', podNames)]),
         );
 
         const repairEntities: ParsedEntitiesHints = {
           fromCandidate: fromRaw,
           toCandidate: toRaw,
-          fundingCandidate,
+          fundingCandidate: primaryFundingCandidate,
           candidates: repairCandidates,
         };
 
-        if (!fundingPod) {
+        if (singleOptions.length === 0 && splitOptions.length === 0) {
           return {
             assistantText:
               `Got it — logged that transfer. Which pod should I pull from to repair the budget plan?`,
@@ -226,22 +340,68 @@ export function interpretMessage(opts: {
           };
         }
 
+        if (splitOptions.length > 0) {
+          const proposedActionDrafts: ProposedActionDraft[] = [];
+          splitOptions.forEach((opt, index) => {
+            const optionLabel = optionLabels[index] ?? undefined;
+            proposedActionDrafts.push(
+              {
+                type: 'budget_repair_restore_donor',
+                payload: {
+                  kind: 'budget_repair_restore_donor',
+                  amount_in_cents: opt.aAmount,
+                  donor_pod_id: from.id,
+                  donor_pod_name: from.name,
+                  funding_pod_id: opt.a.id,
+                  funding_pod_name: opt.a.name,
+                  option_label: optionLabel,
+                },
+              },
+              {
+                type: 'budget_repair_restore_donor',
+                payload: {
+                  kind: 'budget_repair_restore_donor',
+                  amount_in_cents: opt.bAmount,
+                  donor_pod_id: from.id,
+                  donor_pod_name: from.name,
+                  funding_pod_id: opt.b.id,
+                  funding_pod_name: opt.b.name,
+                  option_label: optionLabel,
+                },
+              },
+            );
+          });
+
+          return {
+            assistantText:
+              proposedActionDrafts.length > 2
+                ? `Got it — logged that transfer. I can split the repair across a couple of funding pods. Here are a few options.`
+                : `Got it — logged that transfer. I can split the repair across a couple of funding pods.`,
+            proposedActionDrafts,
+            entities: repairEntities,
+            observedTransferEvent,
+          };
+        }
+
+        const proposedActionDrafts: ProposedActionDraft[] = singleOptions.map((pod, index) => ({
+          type: 'budget_repair_restore_donor',
+          payload: {
+            kind: 'budget_repair_restore_donor',
+            amount_in_cents: amountInCents,
+            donor_pod_id: from.id,
+            donor_pod_name: from.name,
+            funding_pod_id: pod.id,
+            funding_pod_name: pod.name,
+            option_label: singleOptions.length > 1 ? optionLabels[index] : undefined,
+          },
+        }));
+
         return {
           assistantText:
-            `Got it — logged that transfer. Here’s the cleanest way to repair your budget plan.`,
-          proposedActionDrafts: [
-            {
-              type: 'budget_repair_restore_donor',
-              payload: {
-                kind: 'budget_repair_restore_donor',
-                amount_in_cents: amountInCents,
-                donor_pod_id: from.id,
-                donor_pod_name: from.name,
-                funding_pod_id: fundingPod.id,
-                funding_pod_name: fundingPod.name,
-              },
-            },
-          ],
+            proposedActionDrafts.length > 1
+              ? `Got it — logged that transfer. Here are a few ways to repair your budget plan.`
+              : `Got it — logged that transfer. Here’s the cleanest way to repair your budget plan.`,
+          proposedActionDrafts,
           entities: repairEntities,
           observedTransferEvent,
         };

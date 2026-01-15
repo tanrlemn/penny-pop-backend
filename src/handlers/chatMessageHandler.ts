@@ -38,7 +38,12 @@ export async function handleChatMessage(opts: {
     const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
       activeOnly: true,
     });
-    const pods = podsWithSettings.map((p) => ({ id: p.pod.id, name: p.pod.name }));
+    const pods = podsWithSettings.map((p) => ({
+      id: p.pod.id,
+      name: p.pod.name,
+      budgeted_amount_in_cents: p.settings?.budgeted_amount_in_cents ?? 0,
+      category: p.settings?.category ?? null,
+    }));
 
     const { assistantText, proposedActionDrafts, entities, observedTransferEvent } = interpretMessage({
       messageText,
