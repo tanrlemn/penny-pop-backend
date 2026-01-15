@@ -2,6 +2,9 @@
 
 No-UI savings trend sentinel that emails **GREEN / YELLOW / RED** based on whether your configured savings total is growing over a lookback window. It uses balances-only data from Sequence and persists state in a private GitHub Gist.
 
+## What this repo is now
+This repository is a deterministic envelope engine plus routing math. It focuses on the pure calculations for envelope floors, issue detection, fix plans, and deposit routing. The Supabase-backed API layer and Flutter app integration come next.
+
 ## What it does
 - Fetches balances from Sequence (`POST https://api.getsequence.io/accounts` with `x-sequence-access-token: Bearer <token>`).
 - Computes a **Savings Total** from a configured allow-list of account/pod names.
@@ -44,6 +47,17 @@ Required keys:
 - `GIST_ID`, `GIST_TOKEN`, optional `GIST_FILENAME` (defaults to `state.json`)
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
 - `EMAIL_FROM`, `EMAIL_TO`
+
+Supabase (server-side API layer, coming next):
+- `SUPABASE_URL`
+- `SUPABASE_SECRET_KEY` (server-only; never expose to clients)
+
+Quick sanity script (pods for a user across their household(s)):
+
+```bash
+npm run build
+USER_ID="<uuid>" SUPABASE_URL="<url>" SUPABASE_SECRET_KEY="<secret_key>" node dist/scripts/testSupabasePods.js
+```
 
 ## GitHub Actions deployment
 Add repository secrets with the env vars above, then enable the workflow in `.github/workflows/sentinel.yml`.
