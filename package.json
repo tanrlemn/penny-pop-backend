@@ -1,0 +1,31 @@
+{
+  "name": "sequence-savings-sentinel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "No-UI savings trend sentinel for Sequence balances (GREEN/YELLOW/RED email).",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "NODE_OPTIONS=--max-old-space-size=3072 tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "npm run build && node -r dotenv/config dist/index.js",
+    "fixit": "node dist/fixit.js",
+    "fixit:dev": "npm run build && node -r dotenv/config dist/fixit.js",
+    "seed": "npm run build && node dist/seed.js",
+    "budget:sync": "npm run build && node -r dotenv/config dist/scripts/syncBudgetFromCsv.js data/expenses.csv data/income.csv"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.17.0",
+    "dotenv": "^16.4.5",
+    "googleapis": "^170.0.0",
+    "nodemailer": "^7.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/nodemailer": "^6.4.17",
+    "typescript": "^5.6.3"
+  }
+}
