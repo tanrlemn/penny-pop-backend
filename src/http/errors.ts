@@ -1,4 +1,5 @@
 import type { HandlerResult } from '../handlers/http';
+import { API_VERSION } from './version';
 
 export type ErrorPayload = {
   code: string;
@@ -12,7 +13,9 @@ export function errorResponse(payload: ErrorPayload, httpStatus: number): Handle
   return {
     status: httpStatus,
     json: {
+      apiVersion: API_VERSION,
       traceId,
+      code,
       error: message,
       errorInfo: {
         code,

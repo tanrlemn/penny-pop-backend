@@ -61,6 +61,8 @@ export interface ChatMessageRequestBody {
 export interface ChatMessageResponseBody {
   apiVersion?: string;
   traceId?: string;
+  aiUsed?: boolean;
+  warnings?: string[];
   assistantText: string;
   proposedActions: ProposedAction[];
   entities: ParsedEntitiesHints;

@@ -1,4 +1,6 @@
 import { handleApplyActions } from '../../src/handlers/applyActionsHandler';
+import { makeTraceId } from '../../src/http/trace';
+import { API_VERSION } from '../../src/http/version';
 
 export default async function handler(req: any, res: any) {
   let body: any = req.body;
@@ -6,7 +8,13 @@ export default async function handler(req: any, res: any) {
     try {
       body = JSON.parse(body);
     } catch {
-      res.status(400).json({ error: 'Invalid JSON body' });
+      const traceId = makeTraceId();
+      res.status(400).json({
+        apiVersion: API_VERSION,
+        traceId,
+        code: 'BAD_REQUEST',
+        error: 'Invalid JSON body',
+      });
       return;
     }
   }

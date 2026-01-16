@@ -10,6 +10,7 @@ import type { PodWithSettings, Uuid } from '../types/supabase';
 import { errorResponse } from '../http/errors';
 import { checkRateLimit } from '../http/rateLimit';
 import { makeTraceId } from '../http/trace';
+import { API_VERSION } from '../http/version';
 import { applyActionsRequestSchema } from '../http/validation';
 import { asErrorMessage, getHeader, type HandlerResult } from './http';
 
@@ -245,7 +246,7 @@ export async function handleApplyActions(opts: {
         return finalize({
           status: 200,
           json: {
-            apiVersion: 'v1',
+            apiVersion: API_VERSION,
             traceId,
             ...toSnapshot(podsWithSettings, actionIds, []),
           },
@@ -383,7 +384,7 @@ export async function handleApplyActions(opts: {
     return finalize({
       status: 200,
       json: {
-        apiVersion: 'v1',
+        apiVersion: API_VERSION,
         traceId,
         ...toSnapshot(podsWithSettings, actionIds, changes),
       },

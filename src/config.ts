@@ -4,6 +4,6 @@ export const config = {
   },
 };
 
-export const MAX_MESSAGE_CHARS = 800;
-export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const MAX_MESSAGE_CHARS = 500;
+export const RATE_LIMIT_WINDOW_MS = 5 * 60_000;
 export const RATE_LIMIT_MAX = 30;

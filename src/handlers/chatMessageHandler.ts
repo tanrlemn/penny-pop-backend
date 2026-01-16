@@ -1,5 +1,6 @@
 import { verifyUser } from '../auth/verifyUser';
-import { generateProposals } from '../ai/generateProposals';
+import { generateActions } from '../ai/generateActions';
+import { interpretMessage } from '../chat/interpretMessage';
 import { MAX_MESSAGE_CHARS, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from '../config';
 import { hasRecentObservedTransfer, insertBudgetEvents } from '../repos/budgetEventsRepo';
 import { assertUserInHousehold } from '../repos/householdsRepo';
@@ -12,23 +13,63 @@ import type { Uuid } from '../types/supabase';
 import { errorResponse } from '../http/errors';
 import { checkRateLimit } from '../http/rateLimit';
 import { makeTraceId } from '../http/trace';
+import { API_VERSION } from '../http/version';
 import { chatMessageRequestSchema } from '../http/validation';
 import { asErrorMessage, getHeader, type HandlerResult } from './http';
+
+type ChatMessageDeps = {
+  verifyUser: typeof verifyUser;
+  generateActions: typeof generateActions;
+  interpretMessage: typeof interpretMessage;
+  assertUserInHousehold: typeof assertUserInHousehold;
+  listPodsWithSettingsForHousehold: typeof listPodsWithSettingsForHousehold;
+  getOrCreateChatThreadForHousehold: typeof getOrCreateChatThreadForHousehold;
+  insertChatMessage: typeof insertChatMessage;
+  insertProposedActions: typeof insertProposedActions;
+  toApiProposedAction: typeof toApiProposedAction;
+  hasRecentObservedTransfer: typeof hasRecentObservedTransfer;
+  insertBudgetEvents: typeof insertBudgetEvents;
+  checkRateLimit: typeof checkRateLimit;
+  makeTraceId: typeof makeTraceId;
+};
+
+const defaultDeps: ChatMessageDeps = {
+  verifyUser,
+  generateActions,
+  interpretMessage,
+  assertUserInHousehold,
+  listPodsWithSettingsForHousehold,
+  getOrCreateChatThreadForHousehold,
+  insertChatMessage,
+  insertProposedActions,
+  toApiProposedAction,
+  hasRecentObservedTransfer,
+  insertBudgetEvents,
+  checkRateLimit,
+  makeTraceId,
+};
 
 export async function handleChatMessage(opts: {
   method: string;
   headers: Record<string, any>;
   body: any;
-}): Promise<HandlerResult> {
-  const traceId = makeTraceId();
+}, depsOverride?: Partial<ChatMessageDeps>): Promise<HandlerResult> {
+  const deps: ChatMessageDeps = { ...defaultDeps, ...(depsOverride ?? {}) };
+  const traceId = deps.makeTraceId();
   const startedAt = Date.now();
   const route = '/api/chat/message';
   let userIdForLog: string | null = null;
+  let aiUsedForLog = false;
+  let warningsForLog: string[] = [];
+  let actionCountForLog = 0;
   const finalize = (result: HandlerResult): HandlerResult => {
     console.log('chat_message handled', {
       traceId,
       route,
       userId: userIdForLog ?? 'unknown',
+      aiUsed: aiUsedForLog,
+      warnings: warningsForLog,
+      actionCount: actionCountForLog,
       status: result.status,
       duration_ms: Date.now() - startedAt,
     });
@@ -50,7 +91,7 @@ export async function handleChatMessage(opts: {
 
   try {
     const authorization = getHeader(opts.headers, 'authorization');
-    const { userId } = await verifyUser(authorization);
+    const { userId } = await deps.verifyUser(authorization);
     userIdForLog = userId;
 
     const body = (opts.body ?? {}) as ChatMessageRequestBody;
@@ -101,20 +142,20 @@ export async function handleChatMessage(opts: {
       return finalize(
         errorResponse(
           {
-            code: 'BAD_REQUEST',
+            code: 'PAYLOAD_TOO_LARGE',
             message: `Message exceeds ${MAX_MESSAGE_CHARS} characters`,
             traceId,
             details: { max: MAX_MESSAGE_CHARS, length: messageText.length },
           },
-          400,
+          413,
         ),
       );
     }
 
-    await assertUserInHousehold(userId as Uuid, householdId);
+    await deps.assertUserInHousehold(userId as Uuid, householdId);
 
     const limiterKey = `${route}:${userId}:${householdId}`;
-    const limit = checkRateLimit({
+    const limit = deps.checkRateLimit({
       key: limiterKey,
       windowMs: RATE_LIMIT_WINDOW_MS,
       max: RATE_LIMIT_MAX,
@@ -123,7 +164,7 @@ export async function handleChatMessage(opts: {
       return finalize(
         errorResponse(
           {
-            code: 'TOO_MANY_REQUESTS',
+            code: 'RATE_LIMITED',
             message: 'Rate limit exceeded',
             traceId,
             details: {
@@ -137,7 +178,7 @@ export async function handleChatMessage(opts: {
       );
     }
 
-    const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
+    const podsWithSettings = await deps.listPodsWithSettingsForHousehold(householdId, {
       activeOnly: true,
     });
     const pods = podsWithSettings.map((p) => ({
@@ -145,23 +186,72 @@ export async function handleChatMessage(opts: {
       name: p.pod.name,
       budgeted_amount_in_cents: p.settings?.budgeted_amount_in_cents ?? 0,
       category: p.settings?.category ?? null,
+      balance_amount_in_cents: p.pod.balance_amount_in_cents,
+      balance_error: p.pod.balance_error,
+      balance_updated_at: p.pod.balance_updated_at,
     }));
 
-    const { assistantText, proposedActionDrafts, entities, observedTransferEvent } =
-      await generateProposals({
+    const base = deps.interpretMessage({
       messageText,
-      pods,
+      pods: pods.map((p) => ({
+        id: p.id,
+        name: p.name,
+        budgeted_amount_in_cents: p.budgeted_amount_in_cents ?? 0,
+        category: p.category ?? null,
+      })),
     });
 
-    const thread = await getOrCreateChatThreadForHousehold(householdId);
-    await insertChatMessage({
+    let assistantText = base.assistantText;
+    let proposedActionDrafts = base.proposedActionDrafts;
+    let entities = base.entities;
+    const observedTransferEvent = base.observedTransferEvent;
+
+    const warnings: string[] = [];
+    const aiEnabled = process.env.AI_ENABLED === 'true';
+    const aiKeyPresent = !!process.env.OPENAI_API_KEY;
+    const shouldTryAi = aiEnabled && aiKeyPresent;
+    if (aiEnabled && !aiKeyPresent) warnings.push('AI_DISABLED_NO_KEY');
+
+    if (shouldTryAi) {
+      try {
+        const ai = await deps.generateActions({ messageText, pods });
+        if (ai.ok) {
+          aiUsedForLog = true;
+          assistantText = ai.assistantText;
+          proposedActionDrafts = ai.drafts;
+
+          const mergedCandidates = Array.from(
+            new Set([...(base.entities.candidates ?? []), ...(ai.entities.candidates ?? [])]),
+          ).slice(0, 8);
+          entities = {
+            ...base.entities,
+            ...ai.entities,
+            candidates: mergedCandidates,
+          };
+
+          warnings.push(...ai.warnings);
+        } else {
+          warnings.push(...ai.warnings, 'AI_FALLBACK_TO_DETERMINISTIC');
+        }
+      } catch (err) {
+        const msg = asErrorMessage(err);
+        const code = msg.toLowerCase().includes('timed out') ? 'AI_TIMEOUT' : 'AI_ERROR';
+        warnings.push(code, 'AI_FALLBACK_TO_DETERMINISTIC');
+      }
+    }
+
+    warningsForLog = warnings;
+    actionCountForLog = proposedActionDrafts.length;
+
+    const thread = await deps.getOrCreateChatThreadForHousehold(householdId);
+    await deps.insertChatMessage({
       threadId: thread.id,
       senderRole: 'user',
       senderUserId: userId as Uuid,
       text: messageText,
     });
 
-    const assistantMessage = await insertChatMessage({
+    const assistantMessage = await deps.insertChatMessage({
       threadId: thread.id,
       senderRole: 'assistant',
       senderUserId: null,
@@ -172,22 +262,15 @@ export async function handleChatMessage(opts: {
       const amountInCents = observedTransferEvent.amount_in_cents;
       const fromPodId = observedTransferEvent.from_pod_id;
       const toPodId = observedTransferEvent.to_pod_id;
-      const hasRecent = await hasRecentObservedTransfer({
+      const hasRecent = await deps.hasRecentObservedTransfer({
         householdId,
         fromPodId,
         toPodId,
         amountInCents,
       });
 
-      if (hasRecent) {
-        console.log('observed_transfer dedup hit: skipping insert', {
-          householdId,
-          fromPodId,
-          toPodId,
-          amountInCents,
-        });
-      } else {
-        await insertBudgetEvents([
+      if (!hasRecent) {
+        await deps.insertBudgetEvents([
           {
             household_id: householdId,
             actor_user_id: userId as Uuid,
@@ -195,26 +278,22 @@ export async function handleChatMessage(opts: {
             payload: observedTransferEvent,
           },
         ]);
-        console.log('observed_transfer inserted', {
-          householdId,
-          fromPodId,
-          toPodId,
-          amountInCents,
-        });
       }
     }
 
-    const actionRows = await insertProposedActions({
+    const actionRows = await deps.insertProposedActions({
       householdId,
       assistantMessageId: assistantMessage.id,
       actionDrafts: proposedActionDrafts,
     });
 
     const response: ChatMessageResponseBody = {
-      apiVersion: 'v1',
+      apiVersion: API_VERSION,
       traceId,
+      aiUsed: aiUsedForLog,
+      warnings: warningsForLog,
       assistantText,
-      proposedActions: actionRows.map(toApiProposedAction),
+      proposedActions: actionRows.map(deps.toApiProposedAction),
       entities,
     };
 

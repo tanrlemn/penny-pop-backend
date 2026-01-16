@@ -52,6 +52,10 @@ Supabase (server-side API layer):
 - `SUPABASE_URL`
 - `SUPABASE_SECRET_KEY` (server-only; never expose to clients)
 
+AI (optional, proposals-only; never applies changes):
+- `AI_ENABLED` set to `true` to enable AI proposals for `POST /api/chat/message` (fails closed to deterministic parsing on any error).
+- `OPENAI_API_KEY` OpenAI API key for server-side calls (do not expose to clients).
+
 Quick sanity script (pods for a user across their household(s)):
 
 ```bash
@@ -92,6 +96,10 @@ Response body:
 
 ```json
 {
+  "apiVersion": "2026-01-16",
+  "traceId": "<uuid>",
+  "aiUsed": false,
+  "warnings": [],
   "assistantText": "…",
   "proposedActions": [{ "id": "<uuid>", "type": "budget_transfer", "payload": { "kind": "budget_transfer", "...": "..." }, "status": "proposed" }],
   "entities": { "fromCandidate": "…", "toCandidate": "…", "candidates": ["…"] }
