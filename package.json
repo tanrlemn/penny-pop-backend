@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",
-    "@vercel/node": "^5.5.22"
+    "@vercel/node": "^5.5.22",
+    "zod": "^4.3.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

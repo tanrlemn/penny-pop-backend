@@ -59,6 +59,8 @@ export interface ChatMessageRequestBody {
 }
 
 export interface ChatMessageResponseBody {
+  apiVersion?: string;
+  traceId?: string;
   assistantText: string;
   proposedActions: ProposedAction[];
   entities: ParsedEntitiesHints;
@@ -70,6 +72,8 @@ export interface ApplyActionsRequestBody {
 }
 
 export interface ApplyActionsResponseBody {
+  apiVersion?: string;
+  traceId?: string;
   appliedActionIds: Uuid[];
   changes: Array<{
     pod_id: Uuid;

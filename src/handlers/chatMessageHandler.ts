@@ -1,5 +1,6 @@
 import { verifyUser } from '../auth/verifyUser';
-import { interpretMessage } from '../chat/interpretMessage';
+import { generateProposals } from '../ai/generateProposals';
+import { MAX_MESSAGE_CHARS, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from '../config';
 import { hasRecentObservedTransfer, insertBudgetEvents } from '../repos/budgetEventsRepo';
 import { assertUserInHousehold } from '../repos/householdsRepo';
 import { insertChatMessage } from '../repos/chatMessagesRepo';
@@ -8,6 +9,10 @@ import { insertProposedActions, toApiProposedAction } from '../repos/proposedAct
 import { listPodsWithSettingsForHousehold } from '../repos/podsRepo';
 import type { ChatMessageRequestBody, ChatMessageResponseBody } from '../types/chat';
 import type { Uuid } from '../types/supabase';
+import { errorResponse } from '../http/errors';
+import { checkRateLimit } from '../http/rateLimit';
+import { makeTraceId } from '../http/trace';
+import { chatMessageRequestSchema } from '../http/validation';
 import { asErrorMessage, getHeader, type HandlerResult } from './http';
 
 export async function handleChatMessage(opts: {
@@ -15,25 +20,122 @@ export async function handleChatMessage(opts: {
   headers: Record<string, any>;
   body: any;
 }): Promise<HandlerResult> {
+  const traceId = makeTraceId();
+  const startedAt = Date.now();
+  const route = '/api/chat/message';
+  let userIdForLog: string | null = null;
+  const finalize = (result: HandlerResult): HandlerResult => {
+    console.log('chat_message handled', {
+      traceId,
+      route,
+      userId: userIdForLog ?? 'unknown',
+      status: result.status,
+      duration_ms: Date.now() - startedAt,
+    });
+    return result;
+  };
+
   if (opts.method !== 'POST') {
-    return { status: 405, json: { error: 'Method not allowed' } };
+    return finalize(
+      errorResponse(
+        {
+          code: 'METHOD_NOT_ALLOWED',
+          message: 'Method not allowed',
+          traceId,
+        },
+        405,
+      ),
+    );
   }
 
   try {
     const authorization = getHeader(opts.headers, 'authorization');
     const { userId } = await verifyUser(authorization);
+    userIdForLog = userId;
 
-    const householdId = opts.body?.householdId as Uuid | undefined;
-    const messageText = opts.body?.messageText as string | undefined;
+    const body = (opts.body ?? {}) as ChatMessageRequestBody;
+    const householdId = body.householdId as Uuid | undefined;
+    const messageText = body.messageText as string | undefined;
 
     if (!householdId || typeof householdId !== 'string') {
-      return { status: 400, json: { error: 'Missing householdId' } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Missing householdId',
+            traceId,
+          },
+          400,
+        ),
+      );
     }
     if (!messageText || typeof messageText !== 'string') {
-      return { status: 400, json: { error: 'Missing messageText' } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Missing messageText',
+            traceId,
+          },
+          400,
+        ),
+      );
+    }
+
+    const parsed = chatMessageRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Invalid request body',
+            traceId,
+            details: parsed.error.flatten(),
+          },
+          400,
+        ),
+      );
+    }
+
+    if (messageText.length > MAX_MESSAGE_CHARS) {
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: `Message exceeds ${MAX_MESSAGE_CHARS} characters`,
+            traceId,
+            details: { max: MAX_MESSAGE_CHARS, length: messageText.length },
+          },
+          400,
+        ),
+      );
     }
 
     await assertUserInHousehold(userId as Uuid, householdId);
+
+    const limiterKey = `${route}:${userId}:${householdId}`;
+    const limit = checkRateLimit({
+      key: limiterKey,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      max: RATE_LIMIT_MAX,
+    });
+    if (!limit.allowed) {
+      return finalize(
+        errorResponse(
+          {
+            code: 'TOO_MANY_REQUESTS',
+            message: 'Rate limit exceeded',
+            traceId,
+            details: {
+              limit: RATE_LIMIT_MAX,
+              windowMs: RATE_LIMIT_WINDOW_MS,
+              resetAtMs: limit.resetAtMs,
+            },
+          },
+          429,
+        ),
+      );
+    }
 
     const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
       activeOnly: true,
@@ -45,7 +147,8 @@ export async function handleChatMessage(opts: {
       category: p.settings?.category ?? null,
     }));
 
-    const { assistantText, proposedActionDrafts, entities, observedTransferEvent } = interpretMessage({
+    const { assistantText, proposedActionDrafts, entities, observedTransferEvent } =
+      await generateProposals({
       messageText,
       pods,
     });
@@ -108,12 +211,14 @@ export async function handleChatMessage(opts: {
     });
 
     const response: ChatMessageResponseBody = {
+      apiVersion: 'v1',
+      traceId,
       assistantText,
       proposedActions: actionRows.map(toApiProposedAction),
       entities,
     };
 
-    return { status: 200, json: response };
+    return finalize({ status: 200, json: response });
   } catch (err) {
     const msg = asErrorMessage(err);
     const status =
@@ -126,7 +231,22 @@ export async function handleChatMessage(opts: {
           ? 403
           : 500;
 
-    return { status, json: { error: msg } };
+    const code =
+      status === 401
+        ? 'UNAUTHORIZED'
+        : status === 403
+          ? 'FORBIDDEN'
+          : 'INTERNAL_ERROR';
+    return finalize(
+      errorResponse(
+        {
+          code,
+          message: msg,
+          traceId,
+        },
+        status,
+      ),
+    );
   }
 }
 

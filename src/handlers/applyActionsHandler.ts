@@ -1,4 +1,5 @@
 import { verifyUser } from '../auth/verifyUser';
+import { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from '../config';
 import { insertBudgetEvents } from '../repos/budgetEventsRepo';
 import { assertUserInHousehold } from '../repos/householdsRepo';
 import { getProposedActionsForHouseholdByIds, markProposedActionsApplied, markProposedActionFailed } from '../repos/proposedActionsRepo';
@@ -6,6 +7,10 @@ import { listPodsByIds, listPodsWithSettingsForHousehold } from '../repos/podsRe
 import { listPodSettingsByPodIds, upsertPodBudgetedAmountsInCents } from '../repos/podSettingsRepo';
 import type { ApplyActionsResponseBody, ProposedActionPayload } from '../types/chat';
 import type { PodWithSettings, Uuid } from '../types/supabase';
+import { errorResponse } from '../http/errors';
+import { checkRateLimit } from '../http/rateLimit';
+import { makeTraceId } from '../http/trace';
+import { applyActionsRequestSchema } from '../http/validation';
 import { asErrorMessage, getHeader, type HandlerResult } from './http';
 
 function toSnapshot(
@@ -104,8 +109,32 @@ export async function handleApplyActions(opts: {
   headers: Record<string, any>;
   body: any;
 }): Promise<HandlerResult> {
+  const traceId = makeTraceId();
+  const startedAt = Date.now();
+  const route = '/api/actions/apply';
+  let userIdForLog: string | null = null;
+  const finalize = (result: HandlerResult): HandlerResult => {
+    console.log('apply_actions handled', {
+      traceId,
+      route,
+      userId: userIdForLog ?? 'unknown',
+      status: result.status,
+      duration_ms: Date.now() - startedAt,
+    });
+    return result;
+  };
+
   if (opts.method !== 'POST') {
-    return { status: 405, json: { error: 'Method not allowed' } };
+    return finalize(
+      errorResponse(
+        {
+          code: 'METHOD_NOT_ALLOWED',
+          message: 'Method not allowed',
+          traceId,
+        },
+        405,
+      ),
+    );
   }
 
   const appliedAtISO = new Date().toISOString();
@@ -113,18 +142,77 @@ export async function handleApplyActions(opts: {
   try {
     const authorization = getHeader(opts.headers, 'authorization');
     const { userId } = await verifyUser(authorization);
+    userIdForLog = userId;
 
-    const householdId = opts.body?.householdId as Uuid | undefined;
-    const actionIds = (opts.body?.actionIds ?? []) as Uuid[];
+    const body = (opts.body ?? {}) as { householdId?: Uuid; actionIds?: Uuid[] };
+    const householdId = body.householdId as Uuid | undefined;
+    const actionIds = (body.actionIds ?? []) as Uuid[];
 
     if (!householdId || typeof householdId !== 'string') {
-      return { status: 400, json: { error: 'Missing householdId' } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Missing householdId',
+            traceId,
+          },
+          400,
+        ),
+      );
     }
     if (!Array.isArray(actionIds) || actionIds.length === 0) {
-      return { status: 400, json: { error: 'Missing actionIds[]' } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Missing actionIds[]',
+            traceId,
+          },
+          400,
+        ),
+      );
+    }
+
+    const parsed = applyActionsRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: 'Invalid request body',
+            traceId,
+            details: parsed.error.flatten(),
+          },
+          400,
+        ),
+      );
     }
 
     await assertUserInHousehold(userId as Uuid, householdId);
+
+    const limiterKey = `${route}:${userId}:${householdId}`;
+    const limit = checkRateLimit({
+      key: limiterKey,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      max: RATE_LIMIT_MAX,
+    });
+    if (!limit.allowed) {
+      return finalize(
+        errorResponse(
+          {
+            code: 'TOO_MANY_REQUESTS',
+            message: 'Rate limit exceeded',
+            traceId,
+            details: {
+              limit: RATE_LIMIT_MAX,
+              windowMs: RATE_LIMIT_WINDOW_MS,
+              resetAtMs: limit.resetAtMs,
+            },
+          },
+          429,
+        ),
+      );
+    }
 
     const actions = await getProposedActionsForHouseholdByIds({
       householdId,
@@ -134,7 +222,17 @@ export async function handleApplyActions(opts: {
     if (actions.length !== actionIds.length) {
       const found = new Set(actions.map((a) => a.id));
       const missing = actionIds.filter((id) => !found.has(id));
-      return { status: 404, json: { error: 'Some actionIds were not found', missing } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'NOT_FOUND',
+            message: 'Some actionIds were not found',
+            traceId,
+            details: { missing },
+          },
+          404,
+        ),
+      );
     }
 
     const anyNonProposed = actions.some((a) => a.status !== 'proposed');
@@ -144,17 +242,28 @@ export async function handleApplyActions(opts: {
         const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
           activeOnly: true,
         });
-        return { status: 200, json: toSnapshot(podsWithSettings, actionIds, []) };
+        return finalize({
+          status: 200,
+          json: {
+            apiVersion: 'v1',
+            traceId,
+            ...toSnapshot(podsWithSettings, actionIds, []),
+          },
+        });
       }
 
       const firstNonProposed = actions.find((a) => a.status !== 'proposed');
-      return {
-        status: 409,
-        json: {
-          error: `Action ${firstNonProposed?.id} is not in proposed status`,
-          status: firstNonProposed?.status,
-        },
-      };
+      return finalize(
+        errorResponse(
+          {
+            code: 'CONFLICT',
+            message: `Action ${firstNonProposed?.id} is not in proposed status`,
+            traceId,
+            details: { status: firstNonProposed?.status },
+          },
+          409,
+        ),
+      );
     }
 
     const payloads = actions.map((a) => ({
@@ -187,10 +296,28 @@ export async function handleApplyActions(opts: {
     for (const podId of podIds) {
       const pod = podsById.get(podId);
       if (!pod) {
-        return { status: 400, json: { error: `Pod not found for pod_id=${podId}` } };
+        return finalize(
+          errorResponse(
+            {
+              code: 'BAD_REQUEST',
+              message: `Pod not found for pod_id=${podId}`,
+              traceId,
+            },
+            400,
+          ),
+        );
       }
       if (pod.household_id !== householdId) {
-        return { status: 403, json: { error: `Pod ${podId} is not in this household` } };
+        return finalize(
+          errorResponse(
+            {
+              code: 'FORBIDDEN',
+              message: `Pod ${podId} is not in this household`,
+              traceId,
+            },
+            403,
+          ),
+        );
       }
     }
 
@@ -210,7 +337,16 @@ export async function handleApplyActions(opts: {
       );
     } catch (err) {
       const msg = asErrorMessage(err);
-      return { status: 400, json: { error: msg } };
+      return finalize(
+        errorResponse(
+          {
+            code: 'BAD_REQUEST',
+            message: msg,
+            traceId,
+          },
+          400,
+        ),
+      );
     }
 
     const changes = toChanges(podIds, podsById, beforeBudgetByPodId, budgetByPodId);
@@ -244,7 +380,14 @@ export async function handleApplyActions(opts: {
     const podsWithSettings = await listPodsWithSettingsForHousehold(householdId, {
       activeOnly: true,
     });
-    return { status: 200, json: toSnapshot(podsWithSettings, actionIds, changes) };
+    return finalize({
+      status: 200,
+      json: {
+        apiVersion: 'v1',
+        traceId,
+        ...toSnapshot(podsWithSettings, actionIds, changes),
+      },
+    });
   } catch (err) {
     const msg = asErrorMessage(err);
 
@@ -278,7 +421,24 @@ export async function handleApplyActions(opts: {
             ? 400
             : 500;
 
-    return { status, json: { error: msg } };
+    const code =
+      status === 401
+        ? 'UNAUTHORIZED'
+        : status === 403
+          ? 'FORBIDDEN'
+          : status === 400
+            ? 'BAD_REQUEST'
+            : 'INTERNAL_ERROR';
+    return finalize(
+      errorResponse(
+        {
+          code,
+          message: msg,
+          traceId,
+        },
+        status,
+      ),
+    );
   }
 }
 

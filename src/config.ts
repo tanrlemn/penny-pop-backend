@@ -3,3 +3,7 @@ export const config = {
     apiUrl: 'https://api.getsequence.io/accounts',
   },
 };
+
+export const MAX_MESSAGE_CHARS = 800;
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const RATE_LIMIT_MAX = 30;
