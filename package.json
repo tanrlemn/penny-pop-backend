@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/tests/*.test.js dist/*/__tests__/*.test.js"
+    "test": "npm run build && node --test dist/tests/*.test.js dist/*/__tests__/*.test.js",
+    "dev": "npx vercel dev"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",

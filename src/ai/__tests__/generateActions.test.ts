@@ -3,9 +3,9 @@ import test from 'node:test';
 
 import { generateActions } from '../generateActions';
 
-test('generateActions returns ok:false on non-JSON output', async () => {
+test('generateActions returns ok:false on missing tool call', async () => {
   const fetchImpl = async () =>
-    new Response(JSON.stringify({ output_text: 'not json' }), { status: 200 });
+    new Response(JSON.stringify({ output_text: 'not a tool call' }), { status: 200 });
 
   process.env.OPENAI_API_KEY = 'test-key';
 
@@ -24,13 +24,25 @@ test('generateActions returns ok:false on non-JSON output', async () => {
 });
 
 test('generateActions returns ok:false on schema missing required keys', async () => {
-  const aiJson = JSON.stringify({
+  const aiArgs = {
+    intent: 'request_budget_change',
     // assistantText missing
     proposedActionDrafts: [],
-  });
+  };
 
   const fetchImpl = async () =>
-    new Response(JSON.stringify({ output_text: aiJson }), { status: 200 });
+    new Response(
+      JSON.stringify({
+        output: [
+          {
+            type: 'function_call',
+            name: 'propose_budget_actions',
+            arguments: JSON.stringify(aiArgs),
+          },
+        ],
+      }),
+      { status: 200 },
+    );
 
   process.env.OPENAI_API_KEY = 'test-key';
 
@@ -46,7 +58,8 @@ test('generateActions returns ok:false on schema missing required keys', async (
 });
 
 test('generateActions returns ok:false when AI references unknown pod id', async () => {
-  const aiJson = JSON.stringify({
+  const aiArgs = {
+    intent: 'request_budget_change',
     assistantText: 'ok',
     proposedActionDrafts: [
       {
@@ -61,10 +74,21 @@ test('generateActions returns ok:false when AI references unknown pod id', async
         },
       },
     ],
-  });
+  };
 
   const fetchImpl = async () =>
-    new Response(JSON.stringify({ output_text: aiJson }), { status: 200 });
+    new Response(
+      JSON.stringify({
+        output: [
+          {
+            type: 'function_call',
+            name: 'propose_budget_actions',
+            arguments: JSON.stringify(aiArgs),
+          },
+        ],
+      }),
+      { status: 200 },
+    );
 
   process.env.OPENAI_API_KEY = 'test-key';
 
@@ -80,5 +104,57 @@ test('generateActions returns ok:false when AI references unknown pod id', async
   });
 
   assert.equal(result.ok, false);
+});
+
+test('generateActions normalizes missing payload.kind and pod names', async () => {
+  const aiArgs = {
+    intent: 'request_budget_change',
+    assistantText: 'ok',
+    proposedActionDrafts: [
+      {
+        type: 'budget_transfer',
+        payload: {
+          amount_in_cents: 22000,
+          from_pod_id: 'moving',
+          to_pod_id: 'health',
+        },
+      },
+    ],
+  };
+
+  const fetchImpl = async () =>
+    new Response(
+      JSON.stringify({
+        output: [
+          {
+            type: 'function_call',
+            name: 'propose_budget_actions',
+            arguments: JSON.stringify(aiArgs),
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+
+  process.env.OPENAI_API_KEY = 'test-key';
+
+  const result = await generateActions({
+    messageText: 'Move $220 from Moving Fund to Health',
+    pods: [
+      { id: 'moving', name: 'Moving Fund', budgeted_amount_in_cents: 0, category: null },
+      { id: 'health', name: 'Health', budgeted_amount_in_cents: 0, category: null },
+    ],
+    fetchImpl: fetchImpl as any,
+    timeoutMs: 100,
+    model: 'test-model',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.aiUsed, true);
+  assert.equal(result.drafts.length, 1);
+  assert.equal(result.drafts[0].type, 'budget_transfer');
+  assert.equal(result.drafts[0].payload.kind, 'budget_transfer');
+  assert.equal(result.drafts[0].payload.from_pod_name, 'Moving Fund');
+  assert.equal(result.drafts[0].payload.to_pod_name, 'Health');
 });
 

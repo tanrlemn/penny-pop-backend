@@ -9,6 +9,8 @@ export type ProposedActionType =
   | 'budget_adjust'
   | 'budget_repair_restore_donor';
 
+export type ChatIntent = 'observed_transfer' | 'question_advice' | 'request_budget_change';
+
 export type ProposedActionPayload =
   | {
       kind: 'budget_transfer';
@@ -74,6 +76,8 @@ export interface ChatMessageResponseBody {
     aiFailureStage: 'disabled' | 'call_failed' | 'invalid_output' | 'fallback_router' | null;
     aiErrorMessage: string | null;
     modeChosen: 'advisory' | 'proposal' | 'deterministic' | 'help_fallback';
+    intentChosen: ChatIntent;
+    aiIntent: ChatIntent | null;
   };
 }
 

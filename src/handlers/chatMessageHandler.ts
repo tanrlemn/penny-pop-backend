@@ -1,5 +1,5 @@
 import { verifyUser } from '../auth/verifyUser';
-import { generateActions } from '../ai/generateActions';
+import { AiProposeError, aiProposeBudgetActions } from '../ai/client';
 import { interpretMessage } from '../chat/interpretMessage';
 import { MAX_MESSAGE_CHARS, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from '../config';
 import { hasRecentObservedTransfer, insertBudgetEvents } from '../repos/budgetEventsRepo';
@@ -8,7 +8,7 @@ import { insertChatMessage } from '../repos/chatMessagesRepo';
 import { getOrCreateChatThreadForHousehold } from '../repos/chatThreadsRepo';
 import { insertProposedActions, toApiProposedAction } from '../repos/proposedActionsRepo';
 import { listPodsWithSettingsForHousehold } from '../repos/podsRepo';
-import type { ChatMessageRequestBody, ChatMessageResponseBody } from '../types/chat';
+import type { ChatIntent, ChatMessageRequestBody, ChatMessageResponseBody } from '../types/chat';
 import type { Uuid } from '../types/supabase';
 import { errorResponse } from '../http/errors';
 import { checkRateLimit } from '../http/rateLimit';
@@ -19,7 +19,7 @@ import { asErrorMessage, getHeader, type HandlerResult } from './http';
 
 type ChatMessageDeps = {
   verifyUser: typeof verifyUser;
-  generateActions: typeof generateActions;
+  aiProposeBudgetActions: typeof aiProposeBudgetActions;
   interpretMessage: typeof interpretMessage;
   assertUserInHousehold: typeof assertUserInHousehold;
   listPodsWithSettingsForHousehold: typeof listPodsWithSettingsForHousehold;
@@ -35,7 +35,7 @@ type ChatMessageDeps = {
 
 const defaultDeps: ChatMessageDeps = {
   verifyUser,
-  generateActions,
+  aiProposeBudgetActions,
   interpretMessage,
   assertUserInHousehold,
   listPodsWithSettingsForHousehold,
@@ -48,6 +48,31 @@ const defaultDeps: ChatMessageDeps = {
   checkRateLimit,
   makeTraceId,
 };
+
+function classifyIntent(messageText: string): ChatIntent {
+  const text = (messageText ?? '').toLowerCase();
+  const normalized = text.replace(/[^a-z0-9?]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const observedPatterns = [
+    /\bi\s+moved\b/,
+    /\bi\s+transferred\b/,
+    /\bi\s+already\s+moved\b/,
+    /\bi\s+just\s+moved\b/,
+    /\bi\s+sent\b/,
+    /\bi\s+paid\b/,
+    /\bi\s+took\s+from\b/,
+  ];
+  if (observedPatterns.some((re) => re.test(normalized))) {
+    return 'observed_transfer';
+  }
+
+  const questionPatterns = ['got any ideas', 'how should', 'what should', 'can we'];
+  if (questionPatterns.some((phrase) => normalized.includes(phrase)) || normalized.endsWith('?')) {
+    return 'question_advice';
+  }
+
+  return 'request_budget_change';
+}
 
 export async function handleChatMessage(opts: {
   method: string;
@@ -64,6 +89,9 @@ export async function handleChatMessage(opts: {
   let actionCountForLog = 0;
   let aiAttemptedForDebug = false;
   let aiSucceededForDebug = false;
+  let aiEnabled = false;
+  let intentChosenForDebug: ChatIntent = 'request_budget_change';
+  let aiIntentForDebug: ChatIntent | null = null;
   let aiFailureStageForDebug:
     | 'disabled'
     | 'call_failed'
@@ -78,6 +106,10 @@ export async function handleChatMessage(opts: {
       route,
       userId: userIdForLog ?? 'unknown',
       aiUsed: aiUsedForLog,
+      aiEnabled,
+      aiAttempted: aiAttemptedForDebug,
+      aiSucceeded: aiSucceededForDebug,
+      aiFailureStage: aiFailureStageForDebug,
       warnings: warningsForLog,
       actionCount: actionCountForLog,
       status: result.status,
@@ -213,70 +245,94 @@ export async function handleChatMessage(opts: {
       })),
     });
 
+    const intentChosen = classifyIntent(messageText);
+    intentChosenForDebug = intentChosen;
+
     let assistantText = base.assistantText;
     let proposedActionDrafts = base.proposedActionDrafts;
     let entities = base.entities;
     const observedTransferEvent = base.observedTransferEvent;
 
     const warnings: string[] = [];
-    const aiEnabled = process.env.AI_ENABLED === 'true';
+    aiEnabled = process.env.AI_ENABLED === 'true';
     const aiKeyPresent = !!process.env.OPENAI_API_KEY;
-    const shouldTryAi = aiEnabled && aiKeyPresent;
+    const shouldTryAi =
+      aiEnabled && aiKeyPresent && intentChosen !== 'observed_transfer';
     if (aiEnabled && !aiKeyPresent) warnings.push('AI_DISABLED_NO_KEY');
     if (!shouldTryAi) {
-      aiFailureStageForDebug = 'disabled';
+      aiFailureStageForDebug =
+        aiEnabled && aiKeyPresent ? 'fallback_router' : 'disabled';
     }
 
     console.log('chat_message decision_branch', {
       traceId,
       branch: shouldTryAi ? 'ai' : 'deterministic',
+      intentChosen,
     });
 
     if (shouldTryAi) {
       try {
         aiAttemptedForDebug = true;
-        const ai = await deps.generateActions({ messageText, pods });
-        if (ai.ok) {
-          aiUsedForLog = true;
-          aiSucceededForDebug = true;
-          aiFailureStageForDebug = null;
-          assistantText = ai.assistantText;
-          proposedActionDrafts = ai.drafts;
+        const ai = await deps.aiProposeBudgetActions({
+          messageText,
+          pods,
+          traceId,
+          intent: intentChosen,
+        });
+        aiUsedForLog = true;
+        aiSucceededForDebug = true;
+        aiFailureStageForDebug = null;
+        aiIntentForDebug = ai.intent;
 
-          const mergedCandidates = Array.from(
-            new Set([...(base.entities.candidates ?? []), ...(ai.entities.candidates ?? [])]),
-          ).slice(0, 8);
-          entities = {
-            ...base.entities,
-            ...ai.entities,
-            candidates: mergedCandidates,
-          };
-
-          warnings.push(...ai.warnings);
-        } else {
-          aiErrorMessageForDebug = ai.error;
-          aiValidationErrorForLog = ai.validationError ?? null;
-          aiFailureStageForDebug = ai.warnings.includes('AI_NON_JSON') ||
-            ai.warnings.includes('AI_SCHEMA_INVALID')
-            ? 'invalid_output'
-            : ai.warnings.includes('AI_TIMEOUT') || ai.warnings.includes('AI_ERROR')
-              ? 'call_failed'
-              : 'fallback_router';
-          console.warn('chat_message ai_failed', {
-            traceId,
-            error: ai.error,
-            validationError: ai.validationError ?? null,
-          });
-          warnings.push(...ai.warnings, 'AI_FALLBACK_TO_DETERMINISTIC');
+        if (
+          ai.intent === 'observed_transfer' &&
+          ai.proposedActionDrafts.some((draft) => draft.type === 'budget_transfer')
+        ) {
+          throw new AiProposeError(
+            'invalid_args',
+            'observed_transfer intent cannot include budget_transfer actions',
+          );
         }
+
+        assistantText = ai.assistantText;
+        proposedActionDrafts =
+          intentChosen === 'question_advice' ? [] : ai.proposedActionDrafts;
+
+        const mergedCandidates = Array.from(
+          new Set([...(base.entities.candidates ?? []), ...(ai.entities.candidates ?? [])]),
+        ).slice(0, 8);
+        entities = {
+          ...base.entities,
+          ...ai.entities,
+          candidates: mergedCandidates,
+        };
       } catch (err) {
         const msg = asErrorMessage(err);
-        const code = msg.toLowerCase().includes('timed out') ? 'AI_TIMEOUT' : 'AI_ERROR';
+        const aiStage =
+          err instanceof AiProposeError
+            ? err.stage
+            : msg.toLowerCase().includes('timed out')
+              ? 'timeout'
+              : 'api_error';
+        const warning =
+          aiStage === 'timeout'
+            ? 'AI_TIMEOUT'
+            : aiStage === 'tool_missing' || aiStage === 'tool_parse' || aiStage === 'invalid_args'
+              ? 'AI_SCHEMA_INVALID'
+              : aiStage === 'missing_key'
+                ? 'AI_DISABLED_NO_KEY'
+                : 'AI_ERROR';
         aiAttemptedForDebug = true;
-        aiFailureStageForDebug = 'call_failed';
+        aiFailureStageForDebug =
+          aiStage === 'tool_missing' || aiStage === 'tool_parse' || aiStage === 'invalid_args'
+            ? 'invalid_output'
+            : aiStage === 'missing_key'
+              ? 'disabled'
+              : 'call_failed';
         aiErrorMessageForDebug = msg;
-        console.error('chat_message ai_exception', { traceId, error: err });
-        warnings.push(code, 'AI_FALLBACK_TO_DETERMINISTIC');
+        aiValidationErrorForLog = aiStage === 'invalid_args' ? msg : null;
+        console.error('chat_message ai_exception', { traceId, error: err, stage: aiStage });
+        warnings.push(warning, 'AI_FALLBACK_TO_DETERMINISTIC');
       }
     }
 
@@ -354,6 +410,8 @@ export async function handleChatMessage(opts: {
           ? aiErrorMessageForDebug.replace(/\s+/g, ' ').trim().slice(0, 180)
           : null,
         modeChosen,
+        intentChosen: intentChosenForDebug,
+        aiIntent: aiIntentForDebug,
       },
     };
 

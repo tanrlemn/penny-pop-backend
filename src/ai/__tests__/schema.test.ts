@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { aiActionsOutputSchema } from '../schema';
+import { aiProposeResponseSchema } from '../schema';
 
 test('schema rejects unsupported action type', () => {
   const bad = {
+    intent: 'request_budget_change',
     assistantText: 'hi',
     proposedActionDrafts: [
       {
-        type: 'budget_adjust',
-        payload: { kind: 'budget_adjust', delta_in_cents: 100, pod_id: 'x', pod_name: 'X' },
+        type: 'unsupported_action',
+        payload: { kind: 'unsupported_action', delta_in_cents: 100, pod_id: 'x', pod_name: 'X' },
       },
     ],
   };
 
-  const parsed = aiActionsOutputSchema.safeParse(bad);
+  const parsed = aiProposeResponseSchema.safeParse(bad);
   assert.equal(parsed.success, false);
 });
 
@@ -32,16 +33,18 @@ test('schema rejects too many actions', () => {
   };
 
   const bad = {
+    intent: 'request_budget_change',
     assistantText: 'hi',
     proposedActionDrafts: [goodDraft, goodDraft, goodDraft, goodDraft],
   };
 
-  const parsed = aiActionsOutputSchema.safeParse(bad);
+  const parsed = aiProposeResponseSchema.safeParse(bad);
   assert.equal(parsed.success, false);
 });
 
 test('schema rejects non-positive amount_in_cents', () => {
   const bad = {
+    intent: 'request_budget_change',
     assistantText: 'hi',
     proposedActionDrafts: [
       {
@@ -58,7 +61,7 @@ test('schema rejects non-positive amount_in_cents', () => {
     ],
   };
 
-  const parsed = aiActionsOutputSchema.safeParse(bad);
+  const parsed = aiProposeResponseSchema.safeParse(bad);
   assert.equal(parsed.success, false);
 });
 

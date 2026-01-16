@@ -198,7 +198,9 @@ function rankCandidates(query: string, podNames: string[], limit = 8): string[] 
       const qTokens = new Set(q.split(' ').filter(Boolean));
       const nTokens = new Set(n.split(' ').filter(Boolean));
       let overlap = 0;
-      for (const t of qTokens) if (nTokens.has(t)) overlap += 1;
+      qTokens.forEach((t) => {
+        if (nTokens.has(t)) overlap += 1;
+      });
       score += overlap * 50;
 
       // prefer closer lengths
