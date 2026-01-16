@@ -27,6 +27,7 @@ export type GenerateActionsResult =
       aiUsed: false;
       error: string;
       warnings: string[];
+      validationError?: string;
     };
 
 function buildPrompt(opts: { messageText: string; pods: PodSnapshot[] }): string {
@@ -195,6 +196,7 @@ export async function generateActions(opts: {
         aiUsed: false,
         error: 'AI output did not match schema',
         warnings: ['AI_SCHEMA_INVALID'],
+        validationError: JSON.stringify(validated.error.flatten()),
       };
     }
 

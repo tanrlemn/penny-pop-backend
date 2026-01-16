@@ -66,6 +66,15 @@ export interface ChatMessageResponseBody {
   assistantText: string;
   proposedActions: ProposedAction[];
   entities: ParsedEntitiesHints;
+  debug?: {
+    traceId: string;
+    aiEnabled: boolean;
+    aiAttempted: boolean;
+    aiSucceeded: boolean;
+    aiFailureStage: 'disabled' | 'call_failed' | 'invalid_output' | 'fallback_router' | null;
+    aiErrorMessage: string | null;
+    modeChosen: 'advisory' | 'proposal' | 'deterministic' | 'help_fallback';
+  };
 }
 
 export interface ApplyActionsRequestBody {

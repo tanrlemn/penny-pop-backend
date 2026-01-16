@@ -62,6 +62,16 @@ export async function handleChatMessage(opts: {
   let aiUsedForLog = false;
   let warningsForLog: string[] = [];
   let actionCountForLog = 0;
+  let aiAttemptedForDebug = false;
+  let aiSucceededForDebug = false;
+  let aiFailureStageForDebug:
+    | 'disabled'
+    | 'call_failed'
+    | 'invalid_output'
+    | 'fallback_router'
+    | null = null;
+  let aiErrorMessageForDebug: string | null = null;
+  let aiValidationErrorForLog: string | null = null;
   const finalize = (result: HandlerResult): HandlerResult => {
     console.log('chat_message handled', {
       traceId,
@@ -122,6 +132,8 @@ export async function handleChatMessage(opts: {
         ),
       );
     }
+
+    console.log('chat_message incoming', { traceId, messageText });
 
     const parsed = chatMessageRequestSchema.safeParse(body);
     if (!parsed.success) {
@@ -211,12 +223,23 @@ export async function handleChatMessage(opts: {
     const aiKeyPresent = !!process.env.OPENAI_API_KEY;
     const shouldTryAi = aiEnabled && aiKeyPresent;
     if (aiEnabled && !aiKeyPresent) warnings.push('AI_DISABLED_NO_KEY');
+    if (!shouldTryAi) {
+      aiFailureStageForDebug = 'disabled';
+    }
+
+    console.log('chat_message decision_branch', {
+      traceId,
+      branch: shouldTryAi ? 'ai' : 'deterministic',
+    });
 
     if (shouldTryAi) {
       try {
+        aiAttemptedForDebug = true;
         const ai = await deps.generateActions({ messageText, pods });
         if (ai.ok) {
           aiUsedForLog = true;
+          aiSucceededForDebug = true;
+          aiFailureStageForDebug = null;
           assistantText = ai.assistantText;
           proposedActionDrafts = ai.drafts;
 
@@ -231,11 +254,28 @@ export async function handleChatMessage(opts: {
 
           warnings.push(...ai.warnings);
         } else {
+          aiErrorMessageForDebug = ai.error;
+          aiValidationErrorForLog = ai.validationError ?? null;
+          aiFailureStageForDebug = ai.warnings.includes('AI_NON_JSON') ||
+            ai.warnings.includes('AI_SCHEMA_INVALID')
+            ? 'invalid_output'
+            : ai.warnings.includes('AI_TIMEOUT') || ai.warnings.includes('AI_ERROR')
+              ? 'call_failed'
+              : 'fallback_router';
+          console.warn('chat_message ai_failed', {
+            traceId,
+            error: ai.error,
+            validationError: ai.validationError ?? null,
+          });
           warnings.push(...ai.warnings, 'AI_FALLBACK_TO_DETERMINISTIC');
         }
       } catch (err) {
         const msg = asErrorMessage(err);
         const code = msg.toLowerCase().includes('timed out') ? 'AI_TIMEOUT' : 'AI_ERROR';
+        aiAttemptedForDebug = true;
+        aiFailureStageForDebug = 'call_failed';
+        aiErrorMessageForDebug = msg;
+        console.error('chat_message ai_exception', { traceId, error: err });
         warnings.push(code, 'AI_FALLBACK_TO_DETERMINISTIC');
       }
     }
@@ -287,6 +327,15 @@ export async function handleChatMessage(opts: {
       actionDrafts: proposedActionDrafts,
     });
 
+    const modeChosen: 'advisory' | 'proposal' | 'deterministic' | 'help_fallback' =
+      aiSucceededForDebug
+        ? 'proposal'
+        : proposedActionDrafts.length > 0
+          ? 'deterministic'
+          : assistantText.startsWith('I can help with:')
+            ? 'help_fallback'
+            : 'advisory';
+
     const response: ChatMessageResponseBody = {
       apiVersion: API_VERSION,
       traceId,
@@ -295,6 +344,17 @@ export async function handleChatMessage(opts: {
       assistantText,
       proposedActions: actionRows.map(deps.toApiProposedAction),
       entities,
+      debug: {
+        traceId,
+        aiEnabled,
+        aiAttempted: aiAttemptedForDebug,
+        aiSucceeded: aiSucceededForDebug,
+        aiFailureStage: aiFailureStageForDebug,
+        aiErrorMessage: aiErrorMessageForDebug
+          ? aiErrorMessageForDebug.replace(/\s+/g, ' ').trim().slice(0, 180)
+          : null,
+        modeChosen,
+      },
     };
 
     return finalize({ status: 200, json: response });
